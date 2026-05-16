@@ -100,7 +100,9 @@ class BiometricsTransactionLog(Document):
 
 	@frappe.whitelist()
 	def create_employee_checkin(self):
-		"""Manually create Employee Checkin for this transaction"""
+		"""Manually create Employee Checkin for this transaction.
+		Returns a warning (not an error) if hrms / Employee Checkin is not installed.
+		"""
 		if self.checkin_created and self.employee_checkin:
 			frappe.throw("Employee Checkin already created for this transaction")
 
@@ -109,6 +111,12 @@ class BiometricsTransactionLog(Document):
 				"No ERPNext Employee mapped for this transaction. "
 				"Please map the Biometrics employee first."
 			)
+
+		if not frappe.db.table_exists("Employee Checkin"):
+			return {
+				"success": False,
+				"message": "Employee Checkin doctype not found. Install the HRMS app to enable this feature.",
+			}
 
 		try:
 			checkin = frappe.new_doc("Employee Checkin")

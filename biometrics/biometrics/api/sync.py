@@ -833,9 +833,19 @@ def _sync_transaction_logs():
 	}
 
 
+def _checkin_doctype_exists():
+	"""Return True only if the Employee Checkin table is present (requires hrms)."""
+	return frappe.db.table_exists("Employee Checkin")
+
+
 def _create_employee_checkin(transaction_log):
-	"""Create an Employee Checkin record from a Biometrics Transaction Log"""
+	"""Create an Employee Checkin record from a Biometrics Transaction Log.
+	Silently skips if hrms / Employee Checkin table is not installed.
+	"""
 	if not transaction_log.erpnext_employee:
+		return False
+
+	if not _checkin_doctype_exists():
 		return False
 
 	# Check for duplicate checkin

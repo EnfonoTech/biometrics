@@ -183,8 +183,13 @@ def backfill_transaction_logs_for_employee(emp_code, erpnext_employee):
 
 
 def _create_checkin_for_log(transaction_log):
-	"""Create an Employee Checkin from a transaction log if not already exists."""
+	"""Create an Employee Checkin from a transaction log if not already exists.
+	Silently skips if hrms is not installed.
+	"""
 	if not transaction_log.erpnext_employee or transaction_log.checkin_created:
+		return False
+
+	if not frappe.db.table_exists("Employee Checkin"):
 		return False
 
 	# Check for duplicate checkin
