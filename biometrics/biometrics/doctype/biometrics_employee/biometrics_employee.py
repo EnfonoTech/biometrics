@@ -127,37 +127,6 @@ class BiometricsEmployee(Document):
 				"message": f"No matching ERPNext Employee found for emp_code: {self.emp_code}",
 			}
 
-	@frappe.whitelist()
-	def push_to_biometrics(self):
-		"""Push this employee record to Biometrics"""
-		from biometrics.biometrics.api.client import BiometricsClient
-
-		client = BiometricsClient()
-
-		data = {
-			"emp_code": self.emp_code,
-			"first_name": self.first_name or "",
-			"last_name": self.last_name or "",
-		}
-
-		if self.department:
-			dept_id = frappe.db.get_value(
-				"Biometrics Department", self.department, "biometrics_department_id"
-			)
-			if dept_id:
-				data["department"] = dept_id
-
-		if self.biometrics_employee_id:
-			# Update
-			result = client.update_employee(self.biometrics_employee_id, data)
-		else:
-			# Create
-			result = client.create_employee(data)
-			if result and result.get("id"):
-				self.biometrics_employee_id = result["id"]
-				self.save()
-
-		return {"success": True, "result": result}
 
 
 def backfill_transaction_logs_for_employee(emp_code, erpnext_employee):

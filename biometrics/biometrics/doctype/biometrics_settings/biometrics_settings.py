@@ -37,6 +37,9 @@ class BiometricsSettings(Document):
         sync_days_back: DF.Int
         sync_interval_minutes: DF.Int
         username: DF.Data
+        shift_start_time: DF.Time | None
+        shift_end_time: DF.Time | None
+        device_offline_alert_hours: DF.Int
     # end: auto-generated types
 
     @frappe.whitelist()

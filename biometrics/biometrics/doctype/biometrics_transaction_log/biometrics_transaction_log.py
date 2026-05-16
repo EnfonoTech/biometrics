@@ -67,16 +67,33 @@ class BiometricsTransactionLog(Document):
 			self.log_type = settings.default_log_type or ""
 
 	def _resolve_employee(self):
-		"""Resolve ERPNext employee by matching emp_code against attendance_device_id."""
+		"""Resolve ERPNext employee by matching emp_code against attendance_device_id.
+		Tries exact match first, then integer-normalized match (so '001' finds '1').
+		"""
 		if self.erpnext_employee:
 			return
 
+		emp_code = str(self.emp_code).strip()
+
 		result = frappe.db.get_value(
 			"Employee",
-			{"attendance_device_id": self.emp_code, "status": "Active"},
+			{"attendance_device_id": emp_code, "status": "Active"},
 			["name", "employee_name"],
 			as_dict=True,
 		)
+
+		# Fallback: try matching after stripping leading zeros (e.g. "001" vs "1")
+		if not result:
+			try:
+				result = frappe.db.get_value(
+					"Employee",
+					{"attendance_device_id": str(int(emp_code)), "status": "Active"},
+					["name", "employee_name"],
+					as_dict=True,
+				)
+			except (ValueError, TypeError):
+				pass
+
 		if result:
 			self.erpnext_employee = result.name
 			self.employee_name = result.employee_name

@@ -37,7 +37,12 @@
   "cb_emp_1",
   "log_retention_days",
   "section_defaults",
-  "default_user"
+  "default_user",
+  "attendance_policy_section",
+  "shift_start_time",
+  "shift_end_time",
+  "cb_policy_1",
+  "device_offline_alert_hours"
  ],
  "fields": [
   {
@@ -249,6 +254,36 @@
    "fieldtype": "Link",
    "label": "Default User for Auto-Generated Records",
    "options": "User"
+  },
+  {
+   "fieldname": "attendance_policy_section",
+   "fieldtype": "Section Break",
+   "label": "Attendance Policy"
+  },
+  {
+   "default": "08:00:00",
+   "description": "Used on the dashboard to flag late arrivals",
+   "fieldname": "shift_start_time",
+   "fieldtype": "Time",
+   "label": "Shift Start Time"
+  },
+  {
+   "default": "17:00:00",
+   "description": "Used on the dashboard to flag early departures",
+   "fieldname": "shift_end_time",
+   "fieldtype": "Time",
+   "label": "Shift End Time"
+  },
+  {
+   "fieldname": "cb_policy_1",
+   "fieldtype": "Column Break"
+  },
+  {
+   "default": "2",
+   "description": "Show a dashboard alert if a device has had no activity for this many hours",
+   "fieldname": "device_offline_alert_hours",
+   "fieldtype": "Int",
+   "label": "Device Offline Alert (hours)"
   }
  ],
  "issingle": 1,

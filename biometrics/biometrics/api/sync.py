@@ -666,13 +666,29 @@ def _auto_map_employee(doc, settings):
 
 
 def _build_employee_map():
-	"""Build a map of attendance_device_id → ERPNext employee name for all active employees."""
+	"""Build a map of attendance_device_id → ERPNext employee for all active employees.
+
+	Keys are stored as stripped strings so that a machine emp_code of "1" matches
+	an ERPNext attendance_device_id of "1" or " 1" or 1 (integer field).
+	Both the original value and a zero-padded / integer form are indexed so common
+	format mismatches (e.g. "001" vs "1") are also caught.
+	"""
 	rows = frappe.get_all(
 		"Employee",
 		filters={"status": "Active", "attendance_device_id": ["is", "set"]},
 		fields=["name", "employee_name", "attendance_device_id"],
 	)
-	return {r.attendance_device_id: {"name": r.name, "employee_name": r.employee_name} for r in rows}
+	employee_map = {}
+	for r in rows:
+		info = {"name": r.name, "employee_name": r.employee_name}
+		key = str(r.attendance_device_id).strip()
+		employee_map[key] = info
+		# Also index the integer string form so "001" matches "1" and vice-versa
+		try:
+			employee_map[str(int(key))] = info
+		except (ValueError, TypeError):
+			pass
+	return employee_map
 
 
 def _sync_transaction_logs():
@@ -690,6 +706,12 @@ def _sync_transaction_logs():
 	# Build attendance_device_id → ERPNext employee map from site Employee master
 	employee_map = _build_employee_map()
 	if not employee_map:
+		frappe.log_error(
+			title="Biometrics Sync Skipped",
+			message="No active ERPNext employees have Attendance Device ID set. "
+					"Go to Employee master and populate the 'Attendance Device ID' field "
+					"with the emp_code used by the Biometrics machine.",
+		)
 		return {"total": 0, "created": 0, "skipped_no_employee": 0, "skipped_duplicate": 0, "failed": 0, "checkins": 0, "errors": []}
 
 	# Determine time range
@@ -718,14 +740,14 @@ def _sync_transaction_logs():
 
 	for txn in transactions:
 		try:
-			emp_code = cstr(txn.get("emp_code"))
+			emp_code = cstr(txn.get("emp_code")).strip()
 			punch_time = txn.get("punch_time")
 
 			if not emp_code or not punch_time:
 				skipped_no_employee += 1
 				continue
 
-			# Only process transactions for employees present in ERPNext
+			# Match against ERPNext employees (normalized key handles int/string mismatches)
 			emp_info = employee_map.get(emp_code)
 			if not emp_info:
 				skipped_no_employee += 1

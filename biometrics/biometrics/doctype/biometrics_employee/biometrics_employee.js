@@ -36,17 +36,6 @@ frappe.ui.form.on("Biometrics Employee", {
 				});
 			}
 
-			frm.add_custom_button(__("Push to Biometrics"), function () {
-				frm.call("push_to_biometrics").then((r) => {
-					if (r.message && r.message.success) {
-						frappe.show_alert({
-							message: __("Employee pushed to Biometrics"),
-							indicator: "green",
-						});
-						frm.reload_doc();
-					}
-				});
-			});
 		}
 	},
 });

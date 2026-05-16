@@ -64,8 +64,8 @@ frappe.ui.form.on("Biometrics Settings", {
 			});
 		}, __("Sync"));
 
-		// Individual entity sync buttons
-		["Devices", "Employees", "Departments", "Areas", "Positions"].forEach(
+		// Individual entity sync buttons (read-only — pull from machine only)
+		["Devices", "Departments", "Areas", "Positions"].forEach(
 			function (entity) {
 				frm.add_custom_button(
 					__("Sync " + entity),
