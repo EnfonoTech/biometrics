@@ -25,6 +25,25 @@
   {
    "hidden": 0,
    "is_query_report": 0,
+   "label": "HR Dashboard",
+   "link_count": 1,
+   "onboard": 0,
+   "type": "Card Break"
+  },
+  {
+   "description": "Live attendance overview, punch trends, device health and employee logs",
+   "hidden": 0,
+   "is_query_report": 0,
+   "label": "Biometrics Dashboard",
+   "link_count": 0,
+   "link_to": "biometrics-dashboard",
+   "link_type": "Page",
+   "onboard": 1,
+   "type": "Link"
+  },
+  {
+   "hidden": 0,
+   "is_query_report": 0,
    "label": "Configuration",
    "link_count": 2,
    "onboard": 0,
@@ -176,6 +195,13 @@
  "roles": [],
  "sequence_id": 25.0,
  "shortcuts": [
+  {
+   "color": "Purple",
+   "doc_view": "",
+   "label": "HR Dashboard",
+   "link_to": "biometrics-dashboard",
+   "type": "Page"
+  },
   {
    "color": "Blue",
    "doc_view": "",

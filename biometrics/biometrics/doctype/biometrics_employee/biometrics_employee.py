@@ -285,20 +285,12 @@ def bulk_validate_transaction_logs():
 	for row in unmapped_logs:
 		emp_code = row.emp_code
 
-		# Look up Biometrics Employee to get the ERPNext Employee mapping
+		# Match emp_code directly against ERPNext Employee attendance_device_id
 		erpnext_employee = frappe.db.get_value(
-			"Biometrics Employee",
-			{"emp_code": emp_code, "erpnext_employee": ["is", "set"]},
-			"erpnext_employee",
+			"Employee",
+			{"attendance_device_id": emp_code, "status": "Active"},
+			"name",
 		)
-
-		if not erpnext_employee:
-			# Try direct lookup by attendance_device_id
-			erpnext_employee = frappe.db.get_value(
-				"Employee",
-				{"attendance_device_id": emp_code, "status": "Active"},
-				"name",
-			)
 
 		if erpnext_employee:
 			updated, checkins = backfill_transaction_logs_for_employee(emp_code, erpnext_employee)

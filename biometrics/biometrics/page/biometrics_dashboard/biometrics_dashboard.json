@@ -1,0 +1,18 @@
+{
+ "content": "[]",
+ "creation": "2026-01-01 00:00:00",
+ "doctype": "Page",
+ "modified": "2026-01-01 00:00:00",
+ "modified_by": "Administrator",
+ "module": "Biometrics",
+ "name": "biometrics-dashboard",
+ "owner": "Administrator",
+ "page_name": "biometrics-dashboard",
+ "roles": [
+  {"role": "HR Manager"},
+  {"role": "HR User"},
+  {"role": "System Manager"}
+ ],
+ "standard": "Yes",
+ "title": "Biometrics Dashboard"
+}

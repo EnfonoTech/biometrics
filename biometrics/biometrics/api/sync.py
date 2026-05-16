@@ -83,17 +83,14 @@ def _run_full_sync():
 			total_failed += result["failed"]
 			details.append(f"Devices: {result['created']} created, {result['updated']} updated, {result['failed']} failed")
 
-		if settings.pull_employees:
-			result = _sync_employees()
-			total_created += result["created"]
-			total_updated += result["updated"]
-			total_failed += result["failed"]
-			details.append(f"Employees: {result['created']} created, {result['updated']} updated, {result['failed']} failed")
-
-		# Sync transactions
+		# Sync transactions — filtered to ERPNext employees with attendance_device_id
 		tx_result = _sync_transaction_logs()
 		details.append(
-			f"Transactions: {tx_result['created']} new, {tx_result['checkins']} checkins created, {tx_result['failed']} failed"
+			f"Transactions: {tx_result['created']} new, "
+			f"{tx_result['skipped_no_employee']} skipped (not in site), "
+			f"{tx_result['skipped_duplicate']} skipped (duplicate), "
+			f"{tx_result['checkins']} checkins created, "
+			f"{tx_result['failed']} failed"
 		)
 
 		sync_log.reload()
@@ -140,8 +137,9 @@ def _run_sync_transactions():
 		sync_log.checkins_created = result["checkins"]
 		sync_log.log_details = (
 			f"Total transactions fetched: {result['total']}\n"
-			f"New transactions: {result['created']}\n"
-			f"Skipped (already exists): {result['skipped']}\n"
+			f"New transactions created: {result['created']}\n"
+			f"Skipped — employee not in site: {result['skipped_no_employee']}\n"
+			f"Skipped — duplicate: {result['skipped_duplicate']}\n"
 			f"Employee Checkins created: {result['checkins']}\n"
 			f"Failed: {result['failed']}"
 		)
@@ -667,12 +665,32 @@ def _auto_map_employee(doc, settings):
 			doc.mapped = 1
 
 
+def _build_employee_map():
+	"""Build a map of attendance_device_id → ERPNext employee name for all active employees."""
+	rows = frappe.get_all(
+		"Employee",
+		filters={"status": "Active", "attendance_device_id": ["is", "set"]},
+		fields=["name", "employee_name", "attendance_device_id"],
+	)
+	return {r.attendance_device_id: {"name": r.name, "employee_name": r.employee_name} for r in rows}
+
+
 def _sync_transaction_logs():
-	"""Sync transaction logs (punch records) from Biometrics and create Employee Checkins"""
+	"""Sync transaction logs (punch records) from Biometrics.
+
+	Only imports transactions whose emp_code matches an ERPNext Employee's
+	attendance_device_id. All other punches are ignored — no Biometrics
+	Employee master lookup is needed.
+	"""
 	from biometrics.biometrics.api.client import BiometricsClient
 
 	client = BiometricsClient()
 	settings = frappe.get_single("Biometrics Settings")
+
+	# Build attendance_device_id → ERPNext employee map from site Employee master
+	employee_map = _build_employee_map()
+	if not employee_map:
+		return {"total": 0, "created": 0, "skipped_no_employee": 0, "skipped_duplicate": 0, "failed": 0, "checkins": 0, "errors": []}
 
 	# Determine time range
 	if settings.last_transaction_sync:
@@ -687,48 +705,57 @@ def _sync_transaction_logs():
 
 	end_time = now_datetime().strftime("%Y-%m-%d %H:%M:%S")
 
-	# Fetch transactions from Biometrics
+	# Fetch all transactions in the time range
 	transactions = client.get_transactions(start_time=start_time, end_time=end_time)
 
 	total = len(transactions)
 	created = 0
-	skipped = 0
+	skipped_no_employee = 0
+	skipped_duplicate = 0
 	failed = 0
 	checkins = 0
 	errors = []
 
 	for txn in transactions:
 		try:
-			txn_id = txn.get("id")
-
-			# Check if already imported
-			if txn_id and frappe.db.exists(
-				"Biometrics Transaction Log", {"biometrics_transaction_id": txn_id}
-			):
-				skipped += 1
-				continue
-
 			emp_code = cstr(txn.get("emp_code"))
 			punch_time = txn.get("punch_time")
 
 			if not emp_code or not punch_time:
-				failed += 1
+				skipped_no_employee += 1
 				continue
 
-			# Also check for duplicate by emp_code + punch_time
+			# Only process transactions for employees present in ERPNext
+			emp_info = employee_map.get(emp_code)
+			if not emp_info:
+				skipped_no_employee += 1
+				continue
+
+			txn_id = txn.get("id")
+
+			# Skip if already imported by Biometrics transaction ID
+			if txn_id and frappe.db.exists(
+				"Biometrics Transaction Log", {"biometrics_transaction_id": txn_id}
+			):
+				skipped_duplicate += 1
+				continue
+
+			# Skip duplicate by emp_code + punch_time
 			if frappe.db.exists(
 				"Biometrics Transaction Log",
 				{"emp_code": emp_code, "punch_time": punch_time},
 			):
-				skipped += 1
+				skipped_duplicate += 1
 				continue
 
-			# Create transaction log
+			# Create transaction log with employee already resolved
 			log = frappe.new_doc("Biometrics Transaction Log")
 			log.biometrics_transaction_id = txn_id
 			log.emp_code = emp_code
 			log.punch_time = punch_time
 			log.punch_state = cstr(txn.get("punch_state"))
+			log.erpnext_employee = emp_info["name"]
+			log.employee_name = emp_info["employee_name"]
 			log.device_sn = txn.get("terminal_sn")
 			log.device_alias = txn.get("terminal_alias")
 			log.area_alias = txn.get("area_alias")
@@ -745,12 +772,12 @@ def _sync_transaction_logs():
 			log.sync_status = txn.get("sync_status")
 			log.sync_time = txn.get("sync_time")
 
-			# This triggers before_save which resolves employee and maps log_type
+			# before_save maps punch_state → log_type; employee is already set above
 			log.insert(ignore_permissions=True)
 			created += 1
 
-			# Create Employee Checkin if enabled and employee is mapped
-			if settings.create_employee_checkin and log.erpnext_employee:
+			# Create Employee Checkin immediately
+			if settings.create_employee_checkin:
 				try:
 					checkin_result = _create_employee_checkin(log)
 					if checkin_result:
@@ -761,15 +788,14 @@ def _sync_transaction_logs():
 
 		except Exception as e:
 			failed += 1
-			err_msg = f"Transaction {txn.get('id')}: {str(e)}"
-			errors.append(err_msg)
+			errors.append(f"Transaction {txn.get('id')}: {str(e)}")
 			frappe.log_error(
 				title=f"Biometrics Transaction Sync Error: {txn.get('id')}",
 				message=str(e),
 			)
 
 		# Commit in batches
-		if (created + skipped + failed) % 100 == 0:
+		if (created + skipped_no_employee + skipped_duplicate + failed) % 100 == 0:
 			frappe.db.commit()
 
 	frappe.db.commit()
@@ -777,7 +803,8 @@ def _sync_transaction_logs():
 	return {
 		"total": total,
 		"created": created,
-		"skipped": skipped,
+		"skipped_no_employee": skipped_no_employee,
+		"skipped_duplicate": skipped_duplicate,
 		"failed": failed,
 		"checkins": checkins,
 		"errors": errors,

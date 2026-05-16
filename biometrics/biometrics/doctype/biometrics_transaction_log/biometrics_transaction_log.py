@@ -67,33 +67,19 @@ class BiometricsTransactionLog(Document):
 			self.log_type = settings.default_log_type or ""
 
 	def _resolve_employee(self):
-		"""Try to find the ERPNext employee from emp_code"""
+		"""Resolve ERPNext employee by matching emp_code against attendance_device_id."""
 		if self.erpnext_employee:
 			return
 
-		# Look up Biometrics Employee mapping
-		biometrics_emp = frappe.db.get_value(
-			"Biometrics Employee",
-			{"emp_code": self.emp_code},
-			["erpnext_employee", "first_name", "last_name"],
+		result = frappe.db.get_value(
+			"Employee",
+			{"attendance_device_id": self.emp_code, "status": "Active"},
+			["name", "employee_name"],
 			as_dict=True,
 		)
-
-		if biometrics_emp:
-			if biometrics_emp.erpnext_employee:
-				self.erpnext_employee = biometrics_emp.erpnext_employee
-			name_parts = [biometrics_emp.first_name or "", biometrics_emp.last_name or ""]
-			self.employee_name = " ".join(p for p in name_parts if p)
-
-		if not self.erpnext_employee:
-			# Try direct lookup by attendance_device_id
-			employee = frappe.db.get_value(
-				"Employee",
-				{"attendance_device_id": self.emp_code, "status": "Active"},
-				"name",
-			)
-			if employee:
-				self.erpnext_employee = employee
+		if result:
+			self.erpnext_employee = result.name
+			self.employee_name = result.employee_name
 
 	@frappe.whitelist()
 	def create_employee_checkin(self):
