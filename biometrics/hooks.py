@@ -8,7 +8,7 @@ app_license = "mit"
 # Apps
 # ------------------
 
-# required_apps = []
+# required_apps = ["frappe", "erpnext", "hrms"]
 
 # Each item in the list will be shown as an app in the apps page
 # add_to_apps_screen = [
@@ -148,23 +148,27 @@ app_license = "mit"
 # Scheduled Tasks
 # ---------------
 
-# scheduler_events = {
-# 	"all": [
-# 		"biometrics.tasks.all"
-# 	],
-# 	"daily": [
-# 		"biometrics.tasks.daily"
-# 	],
-# 	"hourly": [
-# 		"biometrics.tasks.hourly"
-# 	],
-# 	"weekly": [
-# 		"biometrics.tasks.weekly"
-# 	],
-# 	"monthly": [
-# 		"biometrics.tasks.monthly"
-# 	],
-# }
+scheduler_events = {
+    # 	"all": [
+    # 		"biometrics.tasks.all"
+    # 	],
+    # 	"daily": [
+    # 		"biometrics.tasks.daily"
+    # 	],
+    # 	"hourly": [
+    # 		"biometrics.tasks.hourly"
+    # 	],
+    # 	"weekly": [
+    # 		"biometrics.tasks.weekly"
+    # 	],
+    # 	"monthly": [
+    # 		"biometrics.tasks.monthly"
+    # 	],
+    "cron": {
+        # Run every 5 minutes to check if auto-sync should trigger
+        "*/5 * * * *": ["biometrics.biometrics.api.sync.scheduled_sync"],
+    },
+}
 
 # Testing
 # -------
@@ -236,7 +240,7 @@ app_license = "mit"
 # ]
 
 # Automatically update python controller files with type annotations for this app.
-# export_python_type_annotations = True
+export_python_type_annotations = True
 
 # default_log_clearing_doctypes = {
 # 	"Logging DocType Name": 30  # days to retain logs
