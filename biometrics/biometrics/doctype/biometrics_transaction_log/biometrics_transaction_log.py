@@ -29,7 +29,9 @@ class BiometricsTransactionLog(Document):
 		latitude: DF.Float
 		log_type: DF.Literal["", "IN", "OUT"]
 		longitude: DF.Float
+		map_link: DF.HTML | None
 		mobile: DF.Data | None
+		punch_image: DF.AttachImage | None
 		punch_state: DF.Data | None
 		punch_time: DF.Datetime
 		purpose: DF.Int

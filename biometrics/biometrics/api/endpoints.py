@@ -421,3 +421,19 @@ def get_employee_punch_summary(employee, date_from, date_to):
 		"total_punches": sum(d.total_punches for d in logs),
 		"days_present": len(logs),
 	}
+
+
+@frappe.whitelist()
+def run_auto_map_employees():
+	"""Manually trigger auto-mapping of all unmapped Biometrics Employee records to ERPNext.
+	Returns count of newly mapped records.
+	"""
+	from biometrics.biometrics.api.sync import _auto_map_all_biometrics_employees
+
+	settings = frappe.get_single("Biometrics Settings")
+	mapped = _auto_map_all_biometrics_employees(settings)
+	frappe.db.commit()
+
+	msg = f"Auto-map complete. {mapped} Biometrics Employee record(s) linked to ERPNext."
+	frappe.msgprint(msg, alert=True)
+	return {"mapped": mapped, "message": msg}

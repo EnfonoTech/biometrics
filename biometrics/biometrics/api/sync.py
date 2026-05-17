@@ -93,6 +93,12 @@ def _run_full_sync():
 			f"{tx_result['failed']} failed"
 		)
 
+		# Auto-map any unlinked Biometrics Employee records to ERPNext employees
+		if settings.auto_map_employees:
+			mapped = _auto_map_all_biometrics_employees(settings)
+			if mapped:
+				details.append(f"Auto-mapped {mapped} Biometrics Employee(s) to ERPNext")
+
 		sync_log.reload()
 		sync_log.status = "Completed" if total_failed == 0 else "Partially Failed"
 		sync_log.total_records = total_created + total_updated + total_failed
@@ -610,6 +616,14 @@ def _sync_employees():
 			if settings.auto_map_employees and not doc.erpnext_employee:
 				_auto_map_employee(doc, settings)
 
+			# Sync employee avatar/photo from BioTime
+			avatar = emp_data.get("avatar") or emp_data.get("photo") or emp_data.get("image")
+			if avatar:
+				try:
+					_sync_employee_photo(doc, avatar)
+				except Exception:
+					pass
+
 			doc.last_sync = now_datetime()
 			doc.save(ignore_permissions=True)
 
@@ -786,8 +800,8 @@ def _sync_transaction_logs():
 			log.source = txn.get("source")
 			log.purpose = txn.get("purpose")
 			log.is_attendance = txn.get("is_attendance", 1)
-			log.latitude = txn.get("latitude")
-			log.longitude = txn.get("longitude")
+			log.latitude = txn.get("latitude") or 0
+			log.longitude = txn.get("longitude") or 0
 			log.gps_location = txn.get("gps_location")
 			log.mobile = txn.get("mobile")
 			log.upload_time = txn.get("upload_time")
@@ -797,6 +811,18 @@ def _sync_transaction_logs():
 			# before_save maps punch_state → log_type; employee is already set above
 			log.insert(ignore_permissions=True)
 			created += 1
+
+			# Store punch capture image if BioTime provides one
+			capture = txn.get("capture_picture") or txn.get("face_img") or txn.get("img")
+			if capture:
+				try:
+					_attach_punch_image(log, capture)
+				except Exception:
+					pass
+
+			# Auto-map Biometrics Employee record if it exists and not yet mapped
+			if settings.auto_map_employees:
+				_auto_map_biometrics_employee_record(emp_code, emp_info["name"])
 
 			# Create Employee Checkin immediately
 			if settings.create_employee_checkin:
@@ -881,6 +907,208 @@ def _create_employee_checkin(transaction_log):
 	transaction_log.save(ignore_permissions=True)
 
 	return True
+
+
+def _sync_employee_photo(doc, avatar):
+	"""Download or link the BioTime employee avatar to the Biometrics Employee photo field.
+	avatar can be a URL, a base64 string, or a relative path served by the BioTime server.
+	"""
+	import base64
+	import re
+
+	if not avatar or doc.photo:
+		return
+
+	doc_name = doc.name
+	if not doc_name:
+		return
+
+	# If it's a relative path (BioTime often returns "/media/..."), prepend the server URL
+	if avatar.startswith("/") and not avatar.startswith("//"):
+		settings = frappe.get_single("Biometrics Settings")
+		avatar = settings.server_url.rstrip("/") + avatar
+
+	# URL — download and attach
+	if avatar.startswith("http://") or avatar.startswith("https://"):
+		try:
+			import requests
+			settings = frappe.get_single("Biometrics Settings")
+			token = settings.get_password("auth_token") or ""
+			resp = requests.get(avatar, headers={"Authorization": f"JWT {token}"}, timeout=10)
+			if resp.status_code == 200:
+				content_type = resp.headers.get("Content-Type", "image/jpeg")
+				ext = "jpg" if "jpeg" in content_type else content_type.split("/")[-1].split(";")[0]
+				img_bytes = resp.content
+			else:
+				return
+		except Exception:
+			return
+	else:
+		# base64 string
+		b64 = re.sub(r"^data:[^;]+;base64,", "", avatar)
+		try:
+			img_bytes = base64.b64decode(b64)
+		except Exception:
+			return
+		ext = "png" if avatar.startswith("data:image/png") else "jpg"
+
+	file_name = f"bio_emp_{doc_name.replace(' ', '_')}.{ext}"
+	file_doc = frappe.get_doc(
+		{
+			"doctype": "File",
+			"file_name": file_name,
+			"attached_to_doctype": "Biometrics Employee",
+			"attached_to_name": doc_name,
+			"attached_to_field": "photo",
+			"content": img_bytes,
+			"is_private": 0,
+		}
+	)
+	file_doc.insert(ignore_permissions=True)
+	doc.photo = file_doc.file_url
+
+
+def _auto_map_biometrics_employee_record(emp_code, erpnext_employee):
+	"""Update Biometrics Employee mapped field when a transaction is processed.
+	Only sets the link if the record exists and is not yet mapped to any ERPNext employee.
+	"""
+	bio_emp_name = frappe.db.get_value("Biometrics Employee", {"emp_code": emp_code}, "name")
+	if not bio_emp_name:
+		return
+	existing_link = frappe.db.get_value("Biometrics Employee", bio_emp_name, "erpnext_employee")
+	if existing_link:
+		return
+	# Ensure no conflict: another Biometrics Employee already mapped to this ERPNext employee
+	conflict = frappe.db.get_value(
+		"Biometrics Employee",
+		{"erpnext_employee": erpnext_employee, "name": ["!=", bio_emp_name]},
+		"name",
+	)
+	if conflict:
+		return
+	frappe.db.set_value(
+		"Biometrics Employee",
+		bio_emp_name,
+		{"erpnext_employee": erpnext_employee, "mapped": 1},
+	)
+
+
+def _auto_map_all_biometrics_employees(settings):
+	"""Go through all unmapped Biometrics Employee records and link them to ERPNext employees.
+	Returns the count of newly mapped records.
+	"""
+	unmapped = frappe.get_all(
+		"Biometrics Employee",
+		filters={"erpnext_employee": ["is", "not set"]},
+		fields=["name", "emp_code", "card_no"],
+	)
+	mapped = 0
+	for row in unmapped:
+		emp_code = cstr(row.emp_code).strip()
+		erpnext_employee = None
+
+		if settings.employee_id_field == "Attendance Device ID":
+			erpnext_employee = frappe.db.get_value(
+				"Employee",
+				{"attendance_device_id": emp_code, "status": "Active"},
+				"name",
+			)
+			if not erpnext_employee:
+				# Try integer-normalized form
+				try:
+					erpnext_employee = frappe.db.get_value(
+						"Employee",
+						{"attendance_device_id": str(int(emp_code)), "status": "Active"},
+						"name",
+					)
+				except (ValueError, TypeError):
+					pass
+			# Fallback: try card_no as attendance_device_id
+			if not erpnext_employee and row.card_no:
+				erpnext_employee = frappe.db.get_value(
+					"Employee",
+					{"attendance_device_id": row.card_no, "status": "Active"},
+					"name",
+				)
+		else:
+			erpnext_employee = frappe.db.get_value(
+				"Employee",
+				{"name": emp_code, "status": "Active"},
+				"name",
+			)
+
+		if not erpnext_employee:
+			continue
+
+		# Check no conflict
+		conflict = frappe.db.get_value(
+			"Biometrics Employee",
+			{"erpnext_employee": erpnext_employee, "name": ["!=", row.name]},
+			"name",
+		)
+		if conflict:
+			continue
+
+		frappe.db.set_value(
+			"Biometrics Employee",
+			row.name,
+			{"erpnext_employee": erpnext_employee, "mapped": 1},
+		)
+		mapped += 1
+
+	return mapped
+
+
+def _attach_punch_image(transaction_log, image_data):
+	"""Save a base64-encoded punch capture image as an attachment on the transaction log.
+	image_data can be a base64 string (with or without data URI prefix) or a URL.
+	"""
+	import base64
+	import re
+
+	if not image_data:
+		return
+
+	doc_name = transaction_log.name
+	if not doc_name:
+		return
+
+	# If it's a URL, store it directly in punch_image field via db_set
+	if image_data.startswith("http://") or image_data.startswith("https://"):
+		frappe.db.set_value(
+			"Biometrics Transaction Log", doc_name, "punch_image", image_data, update_modified=False
+		)
+		return
+
+	# Strip data URI prefix if present (e.g. "data:image/jpeg;base64,...")
+	b64_data = re.sub(r"^data:[^;]+;base64,", "", image_data)
+	try:
+		img_bytes = base64.b64decode(b64_data)
+	except Exception:
+		return
+
+	# Determine extension
+	ext = "jpg"
+	if image_data.startswith("data:image/png"):
+		ext = "png"
+
+	file_name = f"punch_{doc_name.replace(' ', '_')}.{ext}"
+
+	file_doc = frappe.get_doc(
+		{
+			"doctype": "File",
+			"file_name": file_name,
+			"attached_to_doctype": "Biometrics Transaction Log",
+			"attached_to_name": doc_name,
+			"attached_to_field": "punch_image",
+			"content": img_bytes,
+			"is_private": 1,
+		}
+	)
+	file_doc.insert(ignore_permissions=True)
+	frappe.db.set_value(
+		"Biometrics Transaction Log", doc_name, "punch_image", file_doc.file_url, update_modified=False
+	)
 
 
 def _create_sync_log(sync_type):

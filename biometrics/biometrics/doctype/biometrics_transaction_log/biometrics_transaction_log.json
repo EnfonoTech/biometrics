@@ -15,6 +15,7 @@
   "erpnext_employee",
   "log_type",
   "checkin_created",
+  "punch_image",
   "sb_device_info",
   "device_sn",
   "device_alias",
@@ -27,6 +28,7 @@
   "latitude",
   "longitude",
   "gps_location",
+  "map_link",
   "cb_location",
   "mobile",
   "is_attendance",
@@ -116,6 +118,13 @@
    "read_only": 1
   },
   {
+   "description": "Face capture image taken at the time of punch (if device supports it)",
+   "fieldname": "punch_image",
+   "fieldtype": "Attach Image",
+   "label": "Punch Image",
+   "read_only": 1
+  },
+  {
    "collapsible": 1,
    "fieldname": "sb_device_info",
    "fieldtype": "Section Break",
@@ -192,6 +201,11 @@
    "read_only": 1
   },
   {
+   "fieldname": "map_link",
+   "fieldtype": "HTML",
+   "label": "Map Link"
+  },
+  {
    "fieldname": "cb_location",
    "fieldtype": "Column Break"
   },
@@ -260,7 +274,7 @@
  ],
  "in_create": 1,
  "links": [],
- "modified": "2026-02-11 16:23:31.711106",
+ "modified": "2026-05-18 00:00:00.000000",
  "modified_by": "Administrator",
  "module": "Biometrics",
  "name": "Biometrics Transaction Log",

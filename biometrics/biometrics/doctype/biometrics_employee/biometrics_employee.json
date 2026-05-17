@@ -6,6 +6,7 @@
  "engine": "InnoDB",
  "field_order": [
   "sb_employee_info",
+  "photo",
   "emp_code",
   "first_name",
   "last_name",
@@ -60,6 +61,12 @@
    "fieldname": "sb_employee_info",
    "fieldtype": "Section Break",
    "label": "Employee Information"
+  },
+  {
+   "fieldname": "photo",
+   "fieldtype": "Attach Image",
+   "label": "Photo",
+   "read_only": 1
   },
   {
    "description": "Biometrics employee code / badge ID",
@@ -349,7 +356,7 @@
    "link_fieldname": "emp_code"
   }
  ],
- "modified": "2026-02-11 17:45:59.176602",
+ "modified": "2026-05-18 00:00:00.000000",
  "modified_by": "Administrator",
  "module": "Biometrics",
  "name": "Biometrics Employee",

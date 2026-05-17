@@ -197,6 +197,28 @@ frappe.ui.form.on("Biometrics Settings", {
 				}
 			);
 		}, __("Utilities"));
+
+		frm.add_custom_button(__("Auto-Map Employees"), function () {
+			frappe.confirm(
+				__("This will attempt to automatically map all unlinked Biometrics Employee records to ERPNext employees by matching emp_code against Attendance Device ID. Continue?"),
+				function () {
+					frappe.call({
+						method: "biometrics.biometrics.api.endpoints.run_auto_map_employees",
+						freeze: true,
+						freeze_message: __("Auto-mapping employees..."),
+						callback: function (r) {
+							if (r.message) {
+								frappe.msgprint({
+									title: __("Auto-Map Complete"),
+									message: r.message.message,
+									indicator: r.message.mapped > 0 ? "green" : "blue",
+								});
+							}
+						},
+					});
+				}
+			);
+		}, __("Utilities"));
 	},
 });
 
