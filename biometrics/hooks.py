@@ -83,7 +83,11 @@ doctype_js = {"Employee": "public/js/employee_biometrics.js"}
 # ------------
 
 # before_install = "biometrics.install.before_install"
-# after_install = "biometrics.install.after_install"
+after_install = "biometrics.install.after_install"
+
+# the Dashboard Charts and Number Cards the workspace points at are not document types Frappe's
+# app sync walks, so they are replayed on every migrate as well as on install
+after_migrate = "biometrics.install.after_migrate"
 
 # Uninstallation
 # ------------
