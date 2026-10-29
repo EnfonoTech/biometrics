@@ -26,10 +26,23 @@ UNSYNCED_DOC_TYPES = ("dashboard_chart", "number_card")
 
 def after_install():
 	import_desk_objects()
+	ensure_api_role()
 
 
 def after_migrate():
 	import_desk_objects()
+	ensure_api_role()
+
+
+def ensure_api_role():
+	"""Create the role that the push API (api/push.py) requires of its integration user."""
+	from biometrics.biometrics.api.push import API_ROLE
+
+	if not frappe.db.exists("Role", API_ROLE):
+		frappe.get_doc({"doctype": "Role", "role_name": API_ROLE, "desk_access": 0}).insert(
+			ignore_permissions=True
+		)
+		frappe.db.commit()
 
 
 def import_desk_objects():
