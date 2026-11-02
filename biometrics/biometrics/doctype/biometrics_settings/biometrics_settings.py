@@ -27,6 +27,8 @@ class BiometricsSettings(Document):
         last_sync_time: DF.Datetime | None
         last_transaction_sync: DF.Datetime | None
         log_retention_days: DF.Int
+        office_latitude: DF.Float
+        office_longitude: DF.Float
         password: DF.Password
         pull_areas: DF.Check
         pull_departments: DF.Check

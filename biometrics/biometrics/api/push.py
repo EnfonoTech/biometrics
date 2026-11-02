@@ -55,9 +55,9 @@ def push_checkins(logs=None):
 	from biometrics.biometrics.api.sync import _build_employee_map
 
 	employee_map = _build_employee_map()
-	default_log_type = frappe.db.get_single_value("Biometrics Settings", "default_log_type") or ""
+	settings = frappe.get_cached_doc("Biometrics Settings")
 
-	results = [_push_one(index, log, employee_map, default_log_type) for index, log in enumerate(logs)]
+	results = [_push_one(index, log, employee_map, settings) for index, log in enumerate(logs)]
 
 	summary = {"received": len(logs), "created": 0, "duplicate": 0, "failed": 0}
 	for result in results:
@@ -66,7 +66,7 @@ def push_checkins(logs=None):
 	return {**summary, "results": results}
 
 
-def _push_one(index, log, employee_map, default_log_type):
+def _push_one(index, log, employee_map, settings):
 	if not isinstance(log, dict):
 		return _error(index, None, None, "Each log must be an object.")
 
@@ -80,7 +80,7 @@ def _push_one(index, log, employee_map, default_log_type):
 	except Exception:
 		return _error(index, emp_code, raw_time, "Invalid 'punch_time'. Use 'YYYY-MM-DD HH:MM:SS'.")
 
-	log_type = cstr(log.get("log_type")).strip().upper() or default_log_type
+	log_type = cstr(log.get("log_type")).strip().upper() or settings.default_log_type or ""
 	if log_type not in ("", "IN", "OUT"):
 		return _error(index, emp_code, raw_time, "'log_type' must be 'IN' or 'OUT'.")
 
@@ -106,6 +106,12 @@ def _push_one(index, log, employee_map, default_log_type):
 		checkin.time = punch_time
 		checkin.log_type = log_type
 		checkin.device_id = cstr(log.get("device_id")).strip()[:140] or "API Push"
+		if settings.office_latitude or settings.office_longitude:
+			checkin.latitude = settings.office_latitude
+			checkin.longitude = settings.office_longitude
+		# HR Settings > Allow Geolocation Tracking demands GPS on every checkin, which only makes sense
+		# for mobile check-ins; a machine punch is located by the machine, so skip that check here only
+		checkin.validate_distance_from_shift_location = lambda: None
 		checkin.insert(ignore_permissions=True)
 	except Exception as e:
 		frappe.db.rollback(save_point="push_checkin")

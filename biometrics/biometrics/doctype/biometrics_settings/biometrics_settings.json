@@ -32,6 +32,10 @@
   "cb_checkin_1",
   "employee_id_field",
   "auto_map_employees",
+  "push_api_section",
+  "office_latitude",
+  "cb_push_api_1",
+  "office_longitude",
   "employee_management_section",
   "block_new_registrations",
   "cb_emp_1",
@@ -221,6 +225,27 @@
    "label": "Auto-Map Employees on Sync"
   },
   {
+   "fieldname": "push_api_section",
+   "fieldtype": "Section Break",
+   "label": "Push API Office Location"
+  },
+  {
+   "fieldname": "office_latitude",
+   "fieldtype": "Float",
+   "label": "Office Latitude",
+   "precision": "7"
+  },
+  {
+   "fieldname": "cb_push_api_1",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "office_longitude",
+   "fieldtype": "Float",
+   "label": "Office Longitude",
+   "precision": "7"
+  },
+  {
    "fieldname": "employee_management_section",
    "fieldtype": "Section Break",
    "label": "Employee Management"
@@ -288,7 +313,7 @@
  ],
  "issingle": 1,
  "links": [],
- "modified": "2026-02-11 15:36:26.426968",
+ "modified": "2026-11-02 10:00:00.000000",
  "modified_by": "Administrator",
  "module": "Biometrics",
  "name": "Biometrics Settings",
