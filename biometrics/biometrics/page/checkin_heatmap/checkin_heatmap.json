@@ -1,0 +1,18 @@
+{
+ "content": "[]",
+ "creation": "2026-11-03 10:00:00",
+ "doctype": "Page",
+ "modified": "2026-11-03 10:00:00",
+ "modified_by": "Administrator",
+ "module": "Biometrics",
+ "name": "checkin-heatmap",
+ "owner": "Administrator",
+ "page_name": "checkin-heatmap",
+ "roles": [
+  {"role": "HR Manager"},
+  {"role": "HR User"},
+  {"role": "System Manager"}
+ ],
+ "standard": "Yes",
+ "title": "Check-in Heatmap"
+}
