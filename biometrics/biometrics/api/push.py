@@ -16,11 +16,14 @@ rows without a machine transaction id would collide with each other.
 import json
 
 import frappe
-from frappe.utils import cstr, get_datetime
+from frappe import _
+from frappe.utils import cstr, get_datetime, getdate
 
 API_ROLE = "Biometrics API"
 ALLOWED_ROLES = {API_ROLE, "HR Manager", "System Manager"}
 MAX_LOGS_PER_REQUEST = 500
+# HRMS adds this comment to the Absent it marks for a working day with no check-ins
+AUTO_ABSENT_COMMENT = "Employee was marked Absent due to missing Employee Checkins."
 
 
 @frappe.whitelist(methods=["POST"])
@@ -96,7 +99,10 @@ def _push_one(index, log, employee_map, settings):
 
 	existing = frappe.db.exists("Employee Checkin", {"employee": employee["name"], "time": punch_time})
 	if existing:
-		return _result(index, emp_code, raw_time, "duplicate", employee, existing)
+		# a resend can repair a punch that was stored before its day got marked Absent
+		return _result(
+			index, emp_code, raw_time, "duplicate", employee, existing, _reopen_auto_absent(existing)
+		)
 
 	# savepoint so a failed insert cannot leave partial rows behind for the rest of the batch
 	frappe.db.savepoint("push_checkin")
@@ -118,11 +124,79 @@ def _push_one(index, log, employee_map, settings):
 		frappe.clear_messages()
 		return _error(index, emp_code, raw_time, cstr(e) or e.__class__.__name__)
 
-	return _result(index, emp_code, raw_time, "created", employee, checkin.name)
+	return _result(
+		index, emp_code, raw_time, "created", employee, checkin.name, _reopen_auto_absent(checkin.name)
+	)
 
 
-def _result(index, emp_code, punch_time, status, employee, checkin):
-	return {
+def _reopen_auto_absent(checkin_name):
+	"""Cancel the Absent HRMS auto-marked for this punch's day, so the next auto attendance run
+	marks the day from the punch. Returns the cancelled Attendance, or None.
+
+	Without this a late punch (backlog, client system offline) is only skipped by auto attendance,
+	because the day already has an Attendance. Absents entered by HR or from leave are left alone.
+	"""
+	checkin = frappe.db.get_value(
+		"Employee Checkin",
+		checkin_name,
+		["employee", "shift", "shift_start", "attendance"],
+		as_dict=True,
+	)
+	if not checkin or checkin.attendance or not checkin.shift or not checkin.shift_start:
+		return None
+
+	attendance = frappe.db.get_value(
+		"Attendance",
+		{
+			"employee": checkin.employee,
+			"attendance_date": getdate(checkin.shift_start),
+			"shift": checkin.shift,
+			"status": "Absent",
+			"docstatus": 1,
+			"leave_type": ("is", "not set"),
+		},
+		"name",
+	)
+	if not attendance or not _is_auto_absent(attendance):
+		return None
+
+	frappe.db.savepoint("reopen_absent")
+	try:
+		doc = frappe.get_doc("Attendance", attendance)
+		doc.flags.ignore_permissions = True
+		doc.cancel()
+		doc.add_comment(
+			"Comment",
+			text=f"Cancelled because a biometric punch ({checkin_name}) was pushed after the day was marked Absent.",
+		)
+		# auto attendance skips a punch it could not link while the Absent existed
+		frappe.db.set_value("Employee Checkin", checkin_name, "skip_auto_attendance", 0)
+	except Exception:
+		frappe.db.rollback(save_point="reopen_absent")
+		frappe.clear_messages()
+		frappe.log_error(title=f"Biometrics push: could not cancel auto Absent {attendance}")
+		return None
+
+	return attendance
+
+
+def _is_auto_absent(attendance):
+	# the comment is stored in the system language at the time the scheduler marked it
+	language = frappe.db.get_single_value("System Settings", "language")
+	messages = list({AUTO_ABSENT_COMMENT, _(AUTO_ABSENT_COMMENT, lang=language)})
+	return frappe.db.exists(
+		"Comment",
+		{
+			"reference_doctype": "Attendance",
+			"reference_name": attendance,
+			"comment_type": "Comment",
+			"content": ("in", messages),
+		},
+	)
+
+
+def _result(index, emp_code, punch_time, status, employee, checkin, absent_cancelled=None):
+	result = {
 		"index": index,
 		"emp_code": emp_code,
 		"punch_time": punch_time,
@@ -131,6 +205,9 @@ def _result(index, emp_code, punch_time, status, employee, checkin):
 		"employee_name": employee["employee_name"],
 		"checkin": checkin,
 	}
+	if absent_cancelled:
+		result["absent_cancelled"] = absent_cancelled
+	return result
 
 
 def _error(index, emp_code, punch_time, message):
