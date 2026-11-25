@@ -177,6 +177,12 @@ scheduler_events = {
     },
 }
 
+# "Backfill Biometric Punches" button (with attendance override) on these lists
+doctype_list_js = {
+    "Attendance": "public/js/biometrics_backfill.js",
+    "Employee Checkin": "public/js/biometrics_backfill.js",
+}
+
 # Testing
 # -------
 

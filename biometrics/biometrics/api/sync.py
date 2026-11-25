@@ -7,9 +7,10 @@ Handles syncing data between Biometrics 8.5 and ERPNext/HRMS.
 Includes: devices, employees, departments, areas, positions, and transactions.
 """
 
+import json
 from datetime import timedelta
 import frappe
-from frappe.utils import now_datetime, get_datetime, getdate, cstr, add_days
+from frappe.utils import now_datetime, get_datetime, getdate, cint, cstr, add_days
 from contextlib import contextmanager
 
 # Every incremental sync re-reads this much before its watermark. A punch that reaches the
@@ -172,8 +173,8 @@ def _record_transaction_result(sync_log, result, label=None):
 		f"Skipped — employee not in site: {result['skipped_no_employee']}\n"
 		f"Skipped — duplicate: {result['skipped_duplicate']}\n"
 		f"Employee Checkins created: {result['checkins']}\n"
-		f"Attendance re-marked from late punches: {len(repair.get('marked', []))}"
-		f" (cancelled {len(repair.get('cancelled', []))})\n"
+		f"Attendance re-marked from check-ins: {len(repair.get('marked', []))}"
+		f" (cancelled {len(repair.get('cancelled', []))}, already correct {repair.get('unchanged', 0)})\n"
 		f"Failed: {result['failed']}"
 	)
 	_complete_sync_log(sync_log)
@@ -191,37 +192,78 @@ def resweep_recent_transactions():
 		_run_sync_window(end_time - timedelta(days=RESWEEP_DAYS), end_time, f"Re-sweep of the last {RESWEEP_DAYS} days")
 
 
+BACKFILL_MAX_DAYS = 366
+# per-employee fetches cover this many days per request (a filtered request stays small)
+EMPLOYEE_CHUNK_DAYS = 31
+
+
 @frappe.whitelist()
-def backfill_transactions(from_date, to_date=None):
+def backfill_transactions(from_date, to_date=None, employees=None, override_attendance=0):
 	"""Re-read punches for a date range, import any that are missing, and re-mark the
-	attendance of days that get a new punch. Safe to repeat: imported punches are skipped."""
+	attendance of days that get a new punch. Safe to repeat: imported punches are skipped.
+
+	employees: optional list (or JSON list) of Employee IDs; empty = every mapped employee.
+	override_attendance: also re-mark every day in the range that has check-ins, replacing
+		the attendance already there (also hand-entered attendance, never leave or Attendance
+		Request attendance), and mark days that have none.
+	"""
 	frappe.only_for(("System Manager", "HR Manager"))
 
 	start_time = get_datetime(f"{getdate(from_date)} 00:00:00")
 	end_time = min(get_datetime(f"{getdate(to_date or from_date)} 23:59:59"), now_datetime())
 	if start_time > end_time:
 		frappe.throw("From Date must be on or before To Date, and not in the future.")
+	if (end_time - start_time).days >= BACKFILL_MAX_DAYS:
+		frappe.throw(f"Backfill at most {BACKFILL_MAX_DAYS} days at a time.")
+
+	employees = _parse_employees(employees)
+	override = bool(cint(override_attendance))
 
 	frappe.enqueue(
 		"biometrics.biometrics.api.sync.run_backfill",
 		queue="long",
 		timeout=3600,
-		job_id=f"biometrics_backfill_{start_time:%Y%m%d}_{end_time:%Y%m%d}",
-		deduplicate=True,
+		job_id="biometrics_backfill_" + frappe.generate_hash(length=8),
 		start_time=str(start_time),
 		end_time=str(end_time),
+		employees=employees,
+		override=override,
 	)
-	return f"Backfill queued for {start_time:%Y-%m-%d} to {end_time:%Y-%m-%d}. See Biometrics Sync Log."
+	who = f"{len(employees)} employee(s)" if employees else "all employees"
+	return (
+		f"Backfill queued for {who}, {start_time:%Y-%m-%d} to {end_time:%Y-%m-%d}"
+		+ (", overriding existing attendance" if override else "")
+		+ ". The result appears in Biometrics Sync Log."
+	)
 
 
-def run_backfill(start_time, end_time):
+def _parse_employees(employees):
+	if not employees:
+		return []
+	if isinstance(employees, str):
+		try:
+			employees = json.loads(employees)
+		except ValueError:
+			employees = [employees]
+	employees = [cstr(e).strip() for e in employees if cstr(e).strip()]
+	missing = [e for e in employees if not frappe.db.exists("Employee", e)]
+	if missing:
+		frappe.throw(f"Unknown Employee: {', '.join(missing)}")
+	return employees
+
+
+def run_backfill(start_time, end_time, employees=None, override=False):
+	label = "Backfill" + (" (override attendance)" if override else "")
+	if employees:
+		label += ": " + ", ".join(employees)
 	with _as_default_user():
-		_run_sync_window(get_datetime(start_time), get_datetime(end_time), "Backfill")
+		_run_sync_window(get_datetime(start_time), get_datetime(end_time), label, employees, override)
 
 
-def _run_sync_window(start_time, end_time, label):
-	"""Import every punch in [start_time, end_time] that is not yet in the site, one day per
-	request so each fetch stays small. Does not touch the incremental watermark."""
+def _run_sync_window(start_time, end_time, label, employees=None, override=False):
+	"""Import every punch in [start_time, end_time] that is not yet in the site. All employees:
+	one day per request so each fetch stays small. Given employees: one request per employee
+	per EMPLOYEE_CHUNK_DAYS days. Does not touch the incremental watermark."""
 	sync_log = _create_sync_log("Transactions")
 	try:
 		sync_log.status = "In Progress"
@@ -229,20 +271,47 @@ def _run_sync_window(start_time, end_time, label):
 		frappe.db.commit()
 
 		total = None
-		chunk_start = start_time
-		while chunk_start < end_time:
-			chunk_end = min(get_datetime(f"{getdate(chunk_start)} 23:59:59"), end_time)
-			result = _sync_transaction_logs(chunk_start, chunk_end)
-			total = _add_results(total, result)
-			chunk_start = get_datetime(f"{add_days(getdate(chunk_start), 1)} 00:00:00")
+		for emp_code in _device_codes(employees) if employees else [None]:
+			step = EMPLOYEE_CHUNK_DAYS if emp_code else 1
+			chunk_start = start_time
+			while chunk_start < end_time:
+				next_start = get_datetime(f"{add_days(getdate(chunk_start), step)} 00:00:00")
+				chunk_end = min(next_start - timedelta(seconds=1), end_time)
+				result = _sync_transaction_logs(chunk_start, chunk_end, emp_code=emp_code)
+				total = _add_results(total, result)
+				chunk_start = next_start
 
 		total = total or _empty_result(start_time, end_time)
 		total["start_time"], total["end_time"] = start_time, end_time
+
+		if override:
+			from biometrics.biometrics.attendance_repair import remark_attendance
+
+			remarked = remark_attendance(getdate(start_time), getdate(end_time), employees, override=True)
+			frappe.db.commit()
+			_merge_attendance(total["attendance"], remarked)
+
 		_record_transaction_result(sync_log, total, label)
 
 	except Exception as e:
 		_fail_sync_log(sync_log, f"{label}: {e}")
 		frappe.log_error(title=f"Biometrics {label} Failed", message=str(e))
+
+
+def _device_codes(employees):
+	codes = []
+	for employee in employees:
+		code = cstr(frappe.db.get_value("Employee", employee, "attendance_device_id")).strip()
+		if not code:
+			frappe.throw(f"Employee {employee} has no Attendance Device ID.")
+		codes.append(code)
+	return codes
+
+
+def _merge_attendance(total, result):
+	for key in ("cancelled", "marked"):
+		total[key] = total.get(key, []) + result.get(key, [])
+	total["unchanged"] = total.get("unchanged", 0) + result.get("unchanged", 0)
 
 
 def _add_results(total, result):
@@ -251,15 +320,14 @@ def _add_results(total, result):
 	for key in ("total", "created", "skipped_no_employee", "skipped_duplicate", "failed", "checkins"):
 		total[key] += result[key]
 	total["errors"] += result["errors"]
-	for key in ("cancelled", "marked"):
-		total["attendance"][key] += result["attendance"][key]
+	_merge_attendance(total["attendance"], result["attendance"])
 	return total
 
 
 def _empty_result(start_time, end_time):
 	return {
 		"total": 0, "created": 0, "skipped_no_employee": 0, "skipped_duplicate": 0,
-		"failed": 0, "checkins": 0, "errors": [], "attendance": {"cancelled": [], "marked": []},
+		"failed": 0, "checkins": 0, "errors": [], "attendance": {"cancelled": [], "marked": [], "unchanged": 0},
 		"start_time": start_time, "end_time": end_time,
 	}
 
@@ -809,7 +877,7 @@ def _build_employee_map():
 	return employee_map
 
 
-def _sync_transaction_logs(start_time=None, end_time=None):
+def _sync_transaction_logs(start_time=None, end_time=None, emp_code=None):
 	"""Sync transaction logs (punch records) from Biometrics.
 
 	Only imports transactions whose emp_code matches an ERPNext Employee's
@@ -845,10 +913,13 @@ def _sync_transaction_logs(start_time=None, end_time=None):
 		return _empty_result(start_time, end_time)
 
 	# Fetch all transactions in the time range (raises if the server returns an incomplete set)
-	transactions = client.get_transactions(
-		start_time=start_time.strftime("%Y-%m-%d %H:%M:%S"),
-		end_time=end_time.strftime("%Y-%m-%d %H:%M:%S"),
-	)
+	filters = {
+		"start_time": start_time.strftime("%Y-%m-%d %H:%M:%S"),
+		"end_time": end_time.strftime("%Y-%m-%d %H:%M:%S"),
+	}
+	if emp_code:
+		filters["emp_code"] = emp_code
+	transactions = client.get_transactions(**filters)
 
 	total = len(transactions)
 	created = 0
@@ -957,7 +1028,7 @@ def _sync_transaction_logs(start_time=None, end_time=None):
 	frappe.db.commit()
 
 	# A punch for a day HRMS has already marked is otherwise ignored by auto attendance
-	attendance = {"cancelled": [], "marked": []}
+	attendance = {"cancelled": [], "marked": [], "unchanged": 0}
 	if new_checkins:
 		from biometrics.biometrics.attendance_repair import repair_attendance_for_checkins
 
