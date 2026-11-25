@@ -172,6 +172,8 @@ scheduler_events = {
     "cron": {
         # Run every 5 minutes to check if auto-sync should trigger
         "*/5 * * * *": ["biometrics.biometrics.api.sync.scheduled_sync"],
+        # Safety net: re-read the last two days and import any punch the incremental sync missed
+        "20 */6 * * *": ["biometrics.biometrics.api.sync.resweep_recent_transactions"],
     },
 }
 

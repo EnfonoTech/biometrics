@@ -145,37 +145,62 @@ class BiometricsClient:
 	def _delete(self, path):
 		return self._request("DELETE", path)
 
-	def _get_all_pages(self, path, params=None):
-		"""Fetch all pages of a paginated API endpoint"""
-		if params is None:
-			params = {}
+	def _get_all_pages(self, path, params=None, page_size=100, require_complete=False):
+		"""Fetch every row of a paginated API endpoint.
 
-		all_results = []
+		BioTime does not order its pages stably: a later page can repeat rows of an earlier
+		page, and the rows it pushed out are then never returned at all (seen on a 140-row
+		transaction window: 100 + 40 rows, only 108 unique). So rows are de-duplicated by id,
+		and when fewer unique rows than the reported count come back, the whole set is fetched
+		again as one page.
+
+		require_complete: raise if rows are still missing after that, so the caller can keep
+		its sync watermark and try again instead of silently losing the rows.
+		"""
+		params = dict(params or {})
+		rows, total = self._fetch_pages(path, params, page_size)
+
+		if total and len(rows) < total and total > page_size:
+			rows, total = self._fetch_pages(path, params, total)
+
+		if require_complete and total and len(rows) < total:
+			raise Exception(
+				f"Biometrics server returned {len(rows)} unique rows of {total} for {path} {params}; "
+				"not importing an incomplete set."
+			)
+
+		return rows
+
+	def _fetch_pages(self, path, params, page_size):
+		"""Read pages until the server reports no next page. Returns (unique rows, reported count)."""
+		rows = []
+		seen = set()
+		total = 0
 		page = 1
-		page_size = 100
-		params["page_size"] = page_size
 
 		while True:
-			params["page"] = page
-			response = self._get(path, params)
-
+			response = self._get(path, {**params, "page_size": page_size, "page": page})
 			results = response.get("data", response.get("results", []))
-			if not results:
+			total = response.get("count") or total
+
+			for row in results:
+				row_id = row.get("id") if isinstance(row, dict) else None
+				if row_id is not None:
+					if row_id in seen:
+						continue
+					seen.add(row_id)
+				rows.append(row)
+
+			if not results or response.get("next") is None:
 				break
 
-			all_results.extend(results)
-
-			# Check if there are more pages
-			if response.get("next") is None:
-				break
-
-			total = response.get("count", 0)
-			if len(all_results) >= total:
+			# guard against a server that keeps returning a "next" link
+			if total and page * page_size >= total:
 				break
 
 			page += 1
 
-		return all_results
+		return rows, total
 
 
 	def get_devices(self, **filters):
@@ -292,7 +317,10 @@ class BiometricsClient:
 		"""Get list of transactions (punch logs)
 		Filters: emp_code, terminal_sn, start_time, end_time, page, page_size
 		"""
-		return self._get_all_pages("/iclock/api/transactions/", params=filters)
+		# large pages: the shift-start rush puts well over 100 punches in one sync window
+		return self._get_all_pages(
+			"/iclock/api/transactions/", params=filters, page_size=1000, require_complete=True
+		)
 
 	def get_transactions_page(self, page=1, page_size=100, **filters):
 		"""Get a single page of transactions"""

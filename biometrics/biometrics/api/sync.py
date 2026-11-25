@@ -9,8 +9,17 @@ Includes: devices, employees, departments, areas, positions, and transactions.
 
 from datetime import timedelta
 import frappe
-from frappe.utils import now_datetime, get_datetime, cstr
+from frappe.utils import now_datetime, get_datetime, getdate, cstr, add_days
 from contextlib import contextmanager
+
+# Every incremental sync re-reads this much before its watermark. A punch that reaches the
+# Biometrics server a few seconds late (upload lag, clock skew, a punch made while a sync is
+# running) falls before the next window's start and would otherwise never be read. Punches
+# already imported are skipped by transaction id, so the overlap costs only a few lookups.
+SYNC_OVERLAP_MINUTES = 30
+
+# The scheduled re-sweep re-reads this many days as a safety net. It does not move the watermark.
+RESWEEP_DAYS = 2
 
 
 @contextmanager
@@ -134,30 +143,125 @@ def _run_sync_transactions():
 		frappe.db.commit()
 
 		result = _sync_transaction_logs()
+		_record_transaction_result(sync_log, result)
 
-		sync_log.reload()
-		sync_log.status = "Completed" if result["failed"] == 0 else "Partially Failed"
-		sync_log.total_records = result["total"]
-		sync_log.records_created = result["created"]
-		sync_log.records_failed = result["failed"]
-		sync_log.checkins_created = result["checkins"]
-		sync_log.log_details = (
-			f"Total transactions fetched: {result['total']}\n"
-			f"New transactions created: {result['created']}\n"
-			f"Skipped — employee not in site: {result['skipped_no_employee']}\n"
-			f"Skipped — duplicate: {result['skipped_duplicate']}\n"
-			f"Employee Checkins created: {result['checkins']}\n"
-			f"Failed: {result['failed']}"
-		)
-		_complete_sync_log(sync_log)
-
-		# Update last transaction sync time
-		frappe.db.set_single_value("Biometrics Settings", "last_transaction_sync", now_datetime())
+		# The next window starts where this one's fetch ended (minus the overlap). Using the
+		# completion time instead would skip punches made while this sync was running.
+		frappe.db.set_single_value("Biometrics Settings", "last_transaction_sync", result["end_time"])
 		frappe.db.commit()
 
 	except Exception as e:
 		_fail_sync_log(sync_log, str(e))
 		frappe.log_error(title="Biometrics Transaction Sync Failed", message=str(e))
+
+
+def _record_transaction_result(sync_log, result, label=None):
+	"""Write a transaction sync result to its Biometrics Sync Log and complete it."""
+	sync_log.reload()
+	sync_log.status = "Completed" if result["failed"] == 0 else "Partially Failed"
+	sync_log.total_records = result["total"]
+	sync_log.records_created = result["created"]
+	sync_log.records_failed = result["failed"]
+	sync_log.checkins_created = result["checkins"]
+	repair = result.get("attendance") or {}
+	sync_log.log_details = (
+		(f"{label}\n" if label else "")
+		+ f"Window: {result.get('start_time')} to {result.get('end_time')}\n"
+		f"Total transactions fetched: {result['total']}\n"
+		f"New transactions created: {result['created']}\n"
+		f"Skipped — employee not in site: {result['skipped_no_employee']}\n"
+		f"Skipped — duplicate: {result['skipped_duplicate']}\n"
+		f"Employee Checkins created: {result['checkins']}\n"
+		f"Attendance re-marked from late punches: {len(repair.get('marked', []))}"
+		f" (cancelled {len(repair.get('cancelled', []))})\n"
+		f"Failed: {result['failed']}"
+	)
+	_complete_sync_log(sync_log)
+
+
+def resweep_recent_transactions():
+	"""Scheduled safety net: re-read the last RESWEEP_DAYS days from the Biometrics server and
+	import any punch the incremental sync missed. Leaves the incremental watermark alone."""
+	settings = frappe.get_single("Biometrics Settings")
+	if not settings.enable_auto_sync:
+		return
+
+	end_time = now_datetime()
+	with _as_default_user():
+		_run_sync_window(end_time - timedelta(days=RESWEEP_DAYS), end_time, f"Re-sweep of the last {RESWEEP_DAYS} days")
+
+
+@frappe.whitelist()
+def backfill_transactions(from_date, to_date=None):
+	"""Re-read punches for a date range, import any that are missing, and re-mark the
+	attendance of days that get a new punch. Safe to repeat: imported punches are skipped."""
+	frappe.only_for(("System Manager", "HR Manager"))
+
+	start_time = get_datetime(f"{getdate(from_date)} 00:00:00")
+	end_time = min(get_datetime(f"{getdate(to_date or from_date)} 23:59:59"), now_datetime())
+	if start_time > end_time:
+		frappe.throw("From Date must be on or before To Date, and not in the future.")
+
+	frappe.enqueue(
+		"biometrics.biometrics.api.sync.run_backfill",
+		queue="long",
+		timeout=3600,
+		job_id=f"biometrics_backfill_{start_time:%Y%m%d}_{end_time:%Y%m%d}",
+		deduplicate=True,
+		start_time=str(start_time),
+		end_time=str(end_time),
+	)
+	return f"Backfill queued for {start_time:%Y-%m-%d} to {end_time:%Y-%m-%d}. See Biometrics Sync Log."
+
+
+def run_backfill(start_time, end_time):
+	with _as_default_user():
+		_run_sync_window(get_datetime(start_time), get_datetime(end_time), "Backfill")
+
+
+def _run_sync_window(start_time, end_time, label):
+	"""Import every punch in [start_time, end_time] that is not yet in the site, one day per
+	request so each fetch stays small. Does not touch the incremental watermark."""
+	sync_log = _create_sync_log("Transactions")
+	try:
+		sync_log.status = "In Progress"
+		sync_log.save(ignore_permissions=True)
+		frappe.db.commit()
+
+		total = None
+		chunk_start = start_time
+		while chunk_start < end_time:
+			chunk_end = min(get_datetime(f"{getdate(chunk_start)} 23:59:59"), end_time)
+			result = _sync_transaction_logs(chunk_start, chunk_end)
+			total = _add_results(total, result)
+			chunk_start = get_datetime(f"{add_days(getdate(chunk_start), 1)} 00:00:00")
+
+		total = total or _empty_result(start_time, end_time)
+		total["start_time"], total["end_time"] = start_time, end_time
+		_record_transaction_result(sync_log, total, label)
+
+	except Exception as e:
+		_fail_sync_log(sync_log, f"{label}: {e}")
+		frappe.log_error(title=f"Biometrics {label} Failed", message=str(e))
+
+
+def _add_results(total, result):
+	if total is None:
+		return result
+	for key in ("total", "created", "skipped_no_employee", "skipped_duplicate", "failed", "checkins"):
+		total[key] += result[key]
+	total["errors"] += result["errors"]
+	for key in ("cancelled", "marked"):
+		total["attendance"][key] += result["attendance"][key]
+	return total
+
+
+def _empty_result(start_time, end_time):
+	return {
+		"total": 0, "created": 0, "skipped_no_employee": 0, "skipped_duplicate": 0,
+		"failed": 0, "checkins": 0, "errors": [], "attendance": {"cancelled": [], "marked": []},
+		"start_time": start_time, "end_time": end_time,
+	}
 
 
 @frappe.whitelist()
@@ -705,17 +809,29 @@ def _build_employee_map():
 	return employee_map
 
 
-def _sync_transaction_logs():
+def _sync_transaction_logs(start_time=None, end_time=None):
 	"""Sync transaction logs (punch records) from Biometrics.
 
 	Only imports transactions whose emp_code matches an ERPNext Employee's
 	attendance_device_id. All other punches are ignored — no Biometrics
 	Employee master lookup is needed.
+
+	Without start_time the window starts SYNC_OVERLAP_MINUTES before the
+	incremental watermark. The result carries the window used, so the caller
+	can move the watermark to its end.
 	"""
 	from biometrics.biometrics.api.client import BiometricsClient
 
 	client = BiometricsClient()
 	settings = frappe.get_single("Biometrics Settings")
+
+	end_time = get_datetime(end_time) if end_time else now_datetime()
+	if start_time:
+		start_time = get_datetime(start_time)
+	elif settings.last_transaction_sync:
+		start_time = get_datetime(settings.last_transaction_sync) - timedelta(minutes=SYNC_OVERLAP_MINUTES)
+	else:
+		start_time = end_time - timedelta(days=settings.sync_days_back or 7)
 
 	# Build attendance_device_id → ERPNext employee map from site Employee master
 	employee_map = _build_employee_map()
@@ -726,23 +842,13 @@ def _sync_transaction_logs():
 					"Go to Employee master and populate the 'Attendance Device ID' field "
 					"with the emp_code used by the Biometrics machine.",
 		)
-		return {"total": 0, "created": 0, "skipped_no_employee": 0, "skipped_duplicate": 0, "failed": 0, "checkins": 0, "errors": []}
+		return _empty_result(start_time, end_time)
 
-	# Determine time range
-	if settings.last_transaction_sync:
-		start_time = get_datetime(settings.last_transaction_sync).strftime(
-			"%Y-%m-%d %H:%M:%S"
-		)
-	else:
-		days_back = settings.sync_days_back or 7
-		start_time = (now_datetime() - timedelta(days=days_back)).strftime(
-			"%Y-%m-%d %H:%M:%S"
-		)
-
-	end_time = now_datetime().strftime("%Y-%m-%d %H:%M:%S")
-
-	# Fetch all transactions in the time range
-	transactions = client.get_transactions(start_time=start_time, end_time=end_time)
+	# Fetch all transactions in the time range (raises if the server returns an incomplete set)
+	transactions = client.get_transactions(
+		start_time=start_time.strftime("%Y-%m-%d %H:%M:%S"),
+		end_time=end_time.strftime("%Y-%m-%d %H:%M:%S"),
+	)
 
 	total = len(transactions)
 	created = 0
@@ -751,6 +857,7 @@ def _sync_transaction_logs():
 	failed = 0
 	checkins = 0
 	errors = []
+	new_checkins = []
 
 	for txn in transactions:
 		try:
@@ -830,6 +937,7 @@ def _sync_transaction_logs():
 					checkin_result = _create_employee_checkin(log)
 					if checkin_result:
 						checkins += 1
+						new_checkins.append(log.employee_checkin)
 				except Exception as e:
 					log.error_message = str(e)
 					log.save(ignore_permissions=True)
@@ -848,6 +956,17 @@ def _sync_transaction_logs():
 
 	frappe.db.commit()
 
+	# A punch for a day HRMS has already marked is otherwise ignored by auto attendance
+	attendance = {"cancelled": [], "marked": []}
+	if new_checkins:
+		from biometrics.biometrics.attendance_repair import repair_attendance_for_checkins
+
+		try:
+			attendance = repair_attendance_for_checkins(new_checkins)
+		except Exception:
+			frappe.log_error(title="Biometrics: attendance re-mark after late punches failed")
+		frappe.db.commit()
+
 	return {
 		"total": total,
 		"created": created,
@@ -856,6 +975,9 @@ def _sync_transaction_logs():
 		"failed": failed,
 		"checkins": checkins,
 		"errors": errors,
+		"attendance": attendance,
+		"start_time": start_time,
+		"end_time": end_time,
 	}
 
 
